@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """一箭又一箭：主程序与 pygame 界面。
 
 运行方式：
@@ -52,6 +52,15 @@ class App:
         pygame.init()
         self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
         pygame.display.set_caption("一箭又一箭")
+
+        # 关键：关闭输入法文本输入，否则中文输入法会截获 H / Z 等字母键
+        try:
+            pygame.key.stop_text_input()
+        except AttributeError:
+            pass
+
+        self._hotkey_prev = {pygame.K_h: False, pygame.K_z: False}
+        self._hotkey_last = {pygame.K_h: -1000, pygame.K_z: -1000}
         self.clock = pygame.time.Clock()
 
         self.fonts = {
@@ -286,14 +295,18 @@ class App:
             self.message = "没有可以撤销的操作"
         self.message_timer = 1.2
 
-    def handle_key(self, key: int) -> None:
+    def handle_key(self, event) -> None:
+        """同时兼容 event.key 和 event.unicode，防止键盘布局差异。"""
+        key = event.key
+        text = (event.unicode or "").lower()
+
         if key == pygame.K_ESCAPE:
             if self.state != "start":
                 self.go_menu()
-        elif key == pygame.K_h and self.state == "playing":
-            self.do_hint()
-        elif key == pygame.K_z and self.state == "playing":
-            self.do_undo()
+        elif (key == pygame.K_h or text == "h") and self.state == "playing":
+            self._trigger_hotkey(pygame.K_h, self.do_hint)
+        elif (key == pygame.K_z or text == "z") and self.state == "playing":
+            self._trigger_hotkey(pygame.K_z, self.do_undo)
         elif key == pygame.K_r and self.state in ("playing", "win", "lose"):
             self.restart_level()
         elif key in (pygame.K_SPACE, pygame.K_RETURN):
@@ -307,8 +320,38 @@ class App:
             elif self.state == "lose":
                 self.restart_level()
 
+    def _handle_text_input(self, text: str) -> None:
+        """TEXTINPUT 兜底：某些输入法环境下 KEYDOWN 可能被吞掉。"""
+        text = text.lower()
+        if self.state != "playing":
+            return
+        if text == "h":
+            self._trigger_hotkey(pygame.K_h, self.do_hint)
+        elif text == "z":
+            self._trigger_hotkey(pygame.K_z, self.do_undo)
+
+    def _trigger_hotkey(self, key: int, action) -> None:
+        """防止 KEYDOWN 和轮询在同一帧触发两次。"""
+        now = pygame.time.get_ticks()
+        if now - self._hotkey_last.get(key, -1000) < 120:
+            return
+        self._hotkey_last[key] = now
+        action()
+
+    def _poll_hotkeys(self) -> None:
+        """备用方案：不依赖 KEYDOWN 事件，轮询物理键盘状态。"""
+        keys = pygame.key.get_pressed()
+        for key, action in ((pygame.K_h, self.do_hint), (pygame.K_z, self.do_undo)):
+            pressed = keys[key]
+            was_pressed = self._hotkey_prev.get(key, False)
+            if pressed and not was_pressed and self.state == "playing":
+                self._trigger_hotkey(key, action)
+            self._hotkey_prev[key] = pressed
+
     # ---------- 更新 ----------
     def update(self, dt: float) -> None:
+        self._poll_hotkeys()
+
         for sprite in self.sprites.values():
             sprite.update(dt)
 
@@ -488,7 +531,12 @@ class App:
                 elif event.type == pygame.MOUSEMOTION:
                     self.handle_motion(event.pos)
                 elif event.type == pygame.KEYDOWN:
-                    self.handle_key(event.key)
+                    self.handle_key(event)
+                elif event.type == pygame.TEXTINPUT:
+                    self._handle_text_input(event.text)
+                elif event.type == pygame.KEYUP:
+                    if event.key in self._hotkey_prev:
+                        self._hotkey_prev[event.key] = False
 
             self.update(dt)
             self.draw()
